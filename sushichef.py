@@ -10,7 +10,7 @@ import json
 from le_utils.constants import licenses, content_kinds, file_formats
 import logging
 import os
-import pafy
+#import pafy
 from pathlib import Path
 import re
 import requests
@@ -63,6 +63,7 @@ forever_adapter = CacheControlAdapter(heuristic=CacheForeverHeuristic(), cache=c
 sess.mount('http://', basic_adapter)
 sess.mount(BASE_URL, forever_adapter)
 
+
 # Main Scraping Method
 ################################################################################
 
@@ -70,23 +71,8 @@ def test():
     """
     Test individual resources
     """
-    #obj_id = "1121"
-    #obj_id = "1166"
-    #obj_id = "31054"
-    #obj_id = "30279"
-    #obj_id = "30636"
-    #obj_id = "30837"
-    #obj_id = "31046"
-    #obj_id = "1075" #--
-    obj_id = "411"
-    #obj_id = "30721"
-    collection_type = "Lesson Plan"
-    #obj_id = "31023"
-    #obj_id = "31034"
-    #collection_type = "Strategy Guide"
-    #obj_id = "31049"
-    #obj_id = "30654"
-    #collection_type = "Printout"
+    obj_id = "30100"
+    collection_type = "Strategy Guide"
     url = "http://www.readwritethink.org/resources/resource-print.html?id={}".format(obj_id)
     channel_tree = dict(
         source_domain="www.readwritethink.org",
@@ -100,12 +86,16 @@ def test():
     )
 
     try:
+        print_page = PrintPage()
+        print_page.search_printpage_url(url)
+        print_page.get_type()
+        print_page.get_grades()
+
         collection = Collection(source_id=url,
             type=collection_type,
             obj_id=obj_id)
         collection.to_file()
-        node = collection.to_node(channel_tree)
-        channel_tree["children"].append(node)
+        collection.to_node(channel_tree)
     except requests.exceptions.HTTPError as e:
         LOGGER.info("Error: {}".format(e))
 
@@ -113,8 +103,9 @@ def test():
 
 
 class ResourceBrowser(object):
-    def __init__(self, resource_url):
+    def __init__(self, resource_url, get_only_id=False):
         self.resource_url = resource_url
+        self.get_only_id = get_only_id
 
     def get_resource_data(self, limit_page=1):
         pass
@@ -153,12 +144,15 @@ class ResourceBrowser(object):
                     url = urljoin(BASE_URL, a["href"])
                     print_page = PrintPage()
                     print_page.search_printpage_url(url)
-                    print_page.get_type()
+                    if self.get_only_id is False:
+                        print_page.get_type()
+                        print_page.get_grades()
                     counter += 1
                     yield dict(url=print_page.url, 
                         collection=print_page.type,
                         id=print_page.resource_id,
-                        sub_type=print_page.sub_type)
+                        sub_type=print_page.sub_type,
+                        grades=print_page.grades)
                 LOGGER.info("  - {} of {}".format(counter, total_items))
                 time.sleep(TIME_SLEEP)
                 page_number += 1
@@ -171,30 +165,54 @@ class PrintPage(object):
         self.url = None
         self.type = None
         self.sub_type = None
+        self.grades = None
         self.resource_id = None
+        self.page = None
 
     def search_printpage_url(self, url):
         try:
             page_contents = downloader.read(url, loadjs=False)
         except requests.exceptions.HTTPError as e:
             LOGGER.info("Error: {}".format(e))
-        page = BeautifulSoup(page_contents, 'html.parser')
-        print_page = page.find(lambda tag: tag.name == "a" and tag.findParent("img", id="icon-materials"))
-        self.url = self.parse_js(print_page.attrs["onclick"])
-        self.resource_id = self.url.split("id=")[-1]
+        else:
+            page = BeautifulSoup(page_contents, 'html.parser')
+            print_page = page.find(lambda tag: tag.name == "a" and tag.findParent("img", id="icon-materials"))
+            if print_page is not None:
+                self.url = self.parse_js(print_page.attrs["onclick"])
+                self.resource_id = self.url.split("id=")[-1]
 
     def get_type(self):
-        try:
-            page_contents = downloader.read(self.url, loadjs=False)
-        except requests.exceptions.HTTPError as e:
-            LOGGER.info("Error: {}".format(e))
-        page = BeautifulSoup(page_contents, 'html.parser')
-        h3 = page.find("h3", class_="pad3b")
-        self.type = h3.text
-        try:
-            self.sub_type = page.find(text="Lesson Plan Type").findNext("td").text
-        except:
-            pass
+        if self.page is None and self.url is not None:
+            try:
+                page_contents = downloader.read(self.url, loadjs=False)
+            except requests.exceptions.HTTPError as e:
+                LOGGER.info("Error: {}".format(e))
+            else:
+                self.page = BeautifulSoup(page_contents, 'html.parser')
+
+        if self.page is not None:
+            h3 = self.page.find("h3", class_="pad3b")
+            self.type = h3.text
+            try:
+                self.sub_type = self.page.find(text="Lesson Plan Type").findNext("td").text
+            except:
+                pass
+
+    def get_grades(self):
+        if self.page is None and self.url is not None:
+            try:
+                page_contents = downloader.read(self.url, loadjs=False)
+            except requests.exceptions.HTTPError as e:
+                LOGGER.info("Error: {}".format(e))
+            else:
+                self.page = BeautifulSoup(page_contents, 'html.parser')
+
+        if self.page is not None:
+            h3 = self.page.find("h3", class_="pad3b")
+            try:
+                self.grades = self.page.find(text=re.compile(r"^Grade")).findNext("td").text        
+            except:
+                pass
 
     def parse_js(self, value):
         init = value.find("/")
@@ -203,7 +221,8 @@ class PrintPage(object):
 
 
 class Collection(object):
-    def __init__(self, source_id, type, obj_id=None, subtype=None):
+    def __init__(self, source_id, type, obj_id=None, subtype=None, grades=None, 
+        theme=None):
         self.page = self.download_page(source_id)
         if self.page is not False:
             self.title = self.clean_title(self.page.find("h1"))
@@ -213,6 +232,8 @@ class Collection(object):
             self.lang = "en"
             self.obj_id = obj_id
             self.subtype = subtype
+            self.grades = grades
+            self.theme = "General" if theme is None or theme == "" else theme
             
             if self.type == "Lesson Plan":
                 self.curriculum_type = LessonPlan()
@@ -238,7 +259,8 @@ class Collection(object):
                 LOGGER.info("Connection error, the resource will be scraped in 5s...")
                 time.sleep(3)
             else:
-                return BeautifulSoup(document, 'html.parser') #html5lib
+                page = BeautifulSoup(document, 'html5lib')#'html.parser') #html5lib
+                return page.find("div", id="print-container")
             tries += 1
         return False
 
@@ -256,6 +278,15 @@ class Collection(object):
 
     ##activities, lessons, etc
     def topic_info(self):
+        theme_node = dict(
+            kind=content_kinds.TOPIC,
+            source_id=self.theme,
+            title=self.theme,
+            description="",
+            license=None,
+            children=[]
+        )
+
         topic_node = dict(
             kind=content_kinds.TOPIC,
             source_id=self.type,
@@ -264,6 +295,7 @@ class Collection(object):
             license=None,
             children=[]
         )
+        topic_node["children"].append(theme_node)
         if self.subtype is not None:
             subtopic_node = dict(
                 kind=content_kinds.TOPIC,
@@ -273,25 +305,14 @@ class Collection(object):
                 license=None,
                 children=[]
             )
-            topic_node["children"].append(subtopic_node)
+            theme_node["children"].append(subtopic_node)
         else:
             subtopic_node = None
-        return topic_node, subtopic_node
-
-    def empty_info(self, url):
-        return dict(
-                kind=content_kinds.TOPIC,
-                source_id=url,
-                title="TMP",
-                thumbnail=None,
-                description="",
-                license=get_license(licenses.CC_BY, copyright_holder="X").as_dict(),
-                children=[]
-            )
+        return topic_node, theme_node, subtopic_node
 
     def to_file(self):
         from collections import namedtuple
-        LOGGER.info(" + [{}|{}]: {}".format(self.type, self.subtype, self.title))
+        LOGGER.info(" + [{}|{}|{}]: {}".format(self.theme, self.type, self.subtype, self.title))
         LOGGER.info("   - URL: {}".format(self.source_id))
         copy_page = copy.copy(self.page)
         base_path = build_path([DATA_DIR, self.type, self.obj_id])
@@ -326,33 +347,75 @@ class Collection(object):
         if printouts_info is not None:
             self.info["children"] += printouts_info
 
-    def to_node(self, tree):
-        if tree is not None and tree.get("source_id", None) != self.type and self.subtype is not None:
-            subnode = get_level_map(tree, [self.type, self.subtype])
-            node = get_level_map(tree, [self.type])
-        elif tree is not None and tree.get("source_id", None) != self.type:
-            node = get_level_map(tree, [self.type])
-            subnode = None
+    def add_nodes(self, topic_node, theme_node):
+        for children in topic_node["children"]:
+            if children["source_id"] == theme_node["source_id"]:
+                break
         else:
-            node = tree
-            subnode = None
+            topic_node["children"].append(theme_node)
 
-        if node is None:
-            node, subtopic_node = self.topic_info()
-            if subtopic_node is not None:
-                subtopic_node["children"].append(self.info)
-            else:
-                node["children"].append(self.info)
-        elif node is not None and subnode is None:
-            _, subtopic_node = self.topic_info()
-            if subtopic_node is not None:
-                subtopic_node["children"].append(self.info)
-                node["children"].append(subtopic_node)
-            else:
-                node["children"].append(self.info)
+    def to_node(self, tree):
+        if tree is not None and\
+            tree.get("source_id", None) != self.theme and\
+            tree.get("source_id", None) != self.type and\
+            self.subtype is not None:
+            subtopic_node = get_level_map(tree, [self.type, self.theme, self.subtype])
+            theme_node = get_level_map(tree, [self.type, self.theme])
+            topic_node = get_level_map(tree, [self.type])
+        elif tree is not None and\
+            tree.get("source_id", None) != self.theme and\
+            tree.get("source_id", None) != self.type:
+            theme_node = get_level_map(tree, [self.type, self.theme])
+            topic_node = get_level_map(tree, [self.type])
+            subtopic_node = None
+        elif tree is not None and tree.get("source_id", None) != self.type:
+            topic_node = get_level_map(tree, [self.type])
+            theme_node = None
+            subtopic_node = None
+        elif tree is None:
+            theme_node = None
+            topic_node = None
+            subtopic_node = None
         else:
-            subnode["children"].append(self.info)
-        return node
+            topic_node = tree
+            theme_node = None
+            subtopic_node = None
+
+        if self.type == "Printout":
+            if tree is None:
+                return self.info
+            else:
+                if topic_node is None:
+                    topic_node, _, _ = self.topic_info()
+                topic_node["children"].append(self.info)
+                return topic_node
+        elif topic_node is None:
+            topic_node, theme_node, subtopic_node = self.topic_info()
+            if subtopic_node is not None:
+                subtopic_node["children"].append(self.info)
+            else:
+                self.add_nodes(theme_node, self.info)
+            self.add_nodes(topic_node, theme_node)
+            tree["children"].append(topic_node)
+        elif topic_node is not None and theme_node is None:
+            _, theme_node, subtopic_node = self.topic_info()
+            if subtopic_node is not None:
+                subtopic_node["children"].append(self.info)
+                self.add_nodes(theme_node, subtopic_node)
+            else:
+                self.add_nodes(theme_node, self.info)
+            self.add_nodes(topic_node, theme_node)
+        elif topic_node is not None and theme_node is not None and subtopic_node is None:
+            _, _, subtopic_node = self.topic_info()
+            if subtopic_node is not None:
+                subtopic_node["children"].append(self.info)
+                theme_node["children"].append(subtopic_node)
+            else:
+                theme_node["children"].append(self.info)
+            self.add_nodes(topic_node, theme_node)
+        else:
+            subtopic_node["children"].append(self.info)
+        return theme_node
 
 
 class CurriculumType(object):
@@ -493,7 +556,7 @@ class CollectionSection(object):
         files_list = []
         for filename, name, pdf_url in pdfs_urls:
             try:
-                response = downloader.read(pdf_url)
+                response = downloader.read(pdf_url, session=sess, timeout=10)
                 pdf_filepath = os.path.join(PDFS_DATA_DIR, filename)
                 with open(pdf_filepath, 'wb') as f:
                     f.write(response)
@@ -535,7 +598,10 @@ class CollectionSection(object):
                 obj_id=print_page.resource_id)
             collection.to_file()
             node = collection.to_node(node)
-        return [node]
+        if node is not None:
+            return [node]
+        else:
+            return []
 
     def get_domain_links(self):
         return set([link.get("href", "") for link in self.body.find_all("a") if link.get("href", "").startswith("/")])
@@ -680,10 +746,10 @@ class CollectionSection(object):
             content = self.get_content()
 
             if menu_index is not None:
-                html = '<html><head><meta charset="UTF-8"></head><body>{}{}</body></html>'.format(
+                html = '<html><head><meta charset="utf-8"><link rel="stylesheet" href="../css/styles.css"></head><body><div class="sidebar"><a class="sidebar-link toggle-sidebar-button" href="javascript:void(0)" onclick="javascript:toggleNavMenu();">&#9776;</a>{}</div><div class="main-content-with-sidebar">{}</div><script src="../js/scripts.js"></script></body></html>'.format(
                     menu_index, content)
             else:
-                html = '<html><head><meta charset="UTF-8"></head><body>{}</body></html>'.format(
+                html = '<html><head><meta charset="utf-8"><link rel="stylesheet" href="../css/styles.css"></head><body><div class="main-content-with-sidebar">{}</div><script src="../js/scripts.js"></script></body></html>'.format(
                     content)
 
             self.write(filename, html)
@@ -777,13 +843,14 @@ class AboutThis(CollectionSection):
     def get_overview(self):
         self.overview = self.collection.page.find(lambda tag: tag.name == "h3" and\
             tag.text == "About This Strategy Guide")
-        node = self.overview.findNext("div")
-        for i in range(5):
-            if node.text is None or len(node.text) < 2:
-                node = node.findNext("p")
-            else:
-                break
-        self.overview = node.text
+        if self.overview is not None:
+            node = self.overview.findNext("div")
+            for i in range(5):
+                if node.text is None or len(node.text) < 2:
+                    node = node.findNext("p")
+                else:
+                    break
+            self.overview = node.text
 
 
 class AboutThisPrintout(CollectionSection):
@@ -834,13 +901,17 @@ class Copyright(CollectionSection):
         self.get_copyright_info()
 
     def get_copyright_info(self):
-        p = self.collection.page.find("p", id="footer-l").text
-        index = p.find("©")
-        if index != -1:
-            self.copyright = p[index:].strip().replace("\n", "").replace("\t", "")
-            LOGGER.info("   - COPYRIGHT INFO:" + self.copyright)
+        p = self.collection.page.find("p", id="footer-l")
+        if p is not None:
+            p_text = p.text
+            index = p_text.find("©")
+            if index != -1:
+                self.copyright = p_text[index:].strip().replace("\n", "").replace("\t", "")
+                LOGGER.info("   - COPYRIGHT INFO:" + self.copyright)
+            else:
+                self.copyright = "ReadWriteThink"
         else:
-            self.copyright = ""
+            self.copyright = "ReadWriteThink"
 
 
 class PrintContainer(CollectionSection):
@@ -866,6 +937,8 @@ class PrintContainer(CollectionSection):
             license=license)
 
     def clean_page(self):
+        for script_tag in self.body.find_all("script"):
+            script_tag.extract()
         self.body.find("p", id="page-url").decompose()
         tabs = self.body.find("div", class_="table-tabs-back")
         if tabs is not None:
@@ -889,12 +962,22 @@ class PrintContainer(CollectionSection):
         with html_writer.HTMLWriter(self.filepath, "w") as zipper:
             zipper.write_index_contents(content)
 
+    def write_css_js(self, filepath):
+        with html_writer.HTMLWriter(filepath, "a") as zipper, open("chefdata/styles.css") as f:
+            content = f.read()
+            zipper.write_contents("styles.css", content, directory="css/")
+
+        with html_writer.HTMLWriter(filepath, "a") as zipper, open("chefdata/scripts.js") as f:
+            content = f.read()
+            zipper.write_contents("scripts.js", content, directory="js/")
+
     def to_file(self):
         if self.body is not None:
             images = self.get_imgs(prefix="files/")
-            html = '<html><head><meta charset="UTF-8"></head><body>{}</body></html>'.format(
-                self.body)
+            html = '<html><head><meta charset="utf-8"><link rel="stylesheet" href="css/styles.css"></head><body><div class="main-content-with-sidebar">{}</div><script src="js/scripts.js"></script></body></html>'.format(self.body)
             self.write(html)
+            self.write_css_js(self.filepath)
+            LOGGER.info("  * " + self.filepath)
             for img_src, img_filename in images:
                 self.write_img(img_src, img_filename)
 
@@ -921,6 +1004,8 @@ class YouTubeResource(ResourceType):
         self.resource_url = self.clean_url(resource_url)
         self.file_format = file_formats.MP4
         self.lang = lang
+        self.filepath = None
+        self.filename = None
 
     def clean_url(self, url):
         if url[-1] == "/":
@@ -939,21 +1024,23 @@ class YouTubeResource(ResourceType):
         url = "".join(url.split("?")[:1])
         return url.replace("embed/", "watch?v=").strip()
 
-    def get_video_info(self):
+    def get_video_info(self, download_to=None, subtitles=True):
         ydl_options = {
-                'writesubtitles': True,
-                'allsubtitles': True,
+                'writesubtitles': subtitles,
+                'allsubtitles': subtitles,
                 'no_warnings': True,
                 'restrictfilenames':True,
                 'continuedl': True,
                 'quiet': False,
-                'format': "bestvideo[height<={maxheight}][ext=mp4]+bestaudio[ext=m4a]/best[height<={maxheight}][ext=mp4]".format(maxheight='720')
+                'format': "bestvideo[height<={maxheight}][ext=mp4]+bestaudio[ext=m4a]/best[height<={maxheight}][ext=mp4]".format(maxheight='480'),
+                'outtmpl': '{}/%(id)s'.format(download_to),
+                'noplaylist': False
             }
 
         with youtube_dl.YoutubeDL(ydl_options) as ydl:
             try:
                 ydl.add_default_info_extractors()
-                info = ydl.extract_info(self.resource_url, download=False)
+                info = ydl.extract_info(self.resource_url, download=(download_to is not None))
                 return info
             except(youtube_dl.utils.DownloadError, youtube_dl.utils.ContentTooShortError,
                     youtube_dl.utils.ExtractorError) as e:
@@ -973,43 +1060,48 @@ class YouTubeResource(ResourceType):
         return subs
 
     def process_file(self, download=False, filepath=None):
-        if download is True:
-            video_filepath = self.video_download(download_to=filepath)
-        else:
-            video_filepath = None
-
-        if video_filepath is not None:
-            files = [dict(file_type=content_kinds.VIDEO, path=video_filepath)]
+        self.download(download=download, base_path=filepath)
+        if self.filepath is not None:
+            files = [dict(file_type=content_kinds.VIDEO, path=self.filepath)]
             files += self.subtitles_dict()
 
             self.add_resource_file(dict(
                 kind=content_kinds.VIDEO,
                 source_id=self.resource_url,
-                title=get_name_from_url_no_ext(video_filepath),
+                title=self.filename,
                 description='',
                 files=files,
                 language=self.lang,
                 license=get_license(licenses.CC_BY, copyright_holder="ReadWriteThink").as_dict()))
 
-    #youtubedl has some troubles downloading videos in youtube,
-    #sometimes raises connection error
-    #for that I choose pafy for downloading
-    def video_download(self, download_to="/tmp/"):
-        for try_number in range(10):
+    def download(self, download=True, base_path=None):
+        if not "watch?" in self.resource_url or "/user/" in self.resource_url or\
+            download is False:
+            return
+
+        download_to = base_path
+        for i in range(4):
             try:
-                video = pafy.new(self.resource_url)
-                best = video.getbest(preftype="mp4")
-                video_filepath = best.download(filepath=download_to)
+                info = self.get_video_info(download_to=download_to, subtitles=False)
+                if info is not None:
+                    LOGGER.info("Video resolution: {}x{}".format(info.get("width", ""), info.get("height", "")))
+                    self.filepath = os.path.join(download_to, "{}.mp4".format(info["id"]))
+                    self.filename = info["title"]
+                    if self.filepath is not None and os.stat(self.filepath).st_size == 0:
+                        LOGGER.info("Empty file")
+                        self.filepath = None
             except (ValueError, IOError, OSError, URLError, ConnectionResetError) as e:
                 LOGGER.info(e)
-                LOGGER.info("Download retry:"+str(try_number))
+                LOGGER.info("Download retry")
                 time.sleep(.8)
             except (youtube_dl.utils.DownloadError, youtube_dl.utils.ContentTooShortError,
                     youtube_dl.utils.ExtractorError, OSError) as e:
                 LOGGER.info("An error ocurred, may be the video is not available.")
                 return
+            except OSError:
+                return
             else:
-                return video_filepath
+                return
 
     def to_file(self, filepath=None):
         self.process_file(download=DOWNLOAD_VIDEOS, filepath=filepath)
@@ -1072,7 +1164,21 @@ class ReadWriteThinkChef(JsonTreeChef):
                                 ReadWriteThinkChef.CRAWLING_STAGE_OUTPUT_TPL)
         super(ReadWriteThinkChef, self).__init__()
 
+    def download_css_js(self):
+        r = requests.get("https://raw.githubusercontent.com/learningequality/html-app-starter/master/css/styles.css")
+        with open("chefdata/styles.css", "wb") as f:
+            f.write(r.content)
+
+        r = requests.get("https://raw.githubusercontent.com/learningequality/html-app-starter/master/js/scripts.js")
+        with open("chefdata/scripts.js", "wb") as f:
+            f.write(r.content)
+
     def pre_run(self, args, options):
+        css = os.path.join(os.path.dirname(os.path.realpath(__file__)), "chefdata/styles.css")
+        js = os.path.join(os.path.dirname(os.path.realpath(__file__)), "chefdata/scripts.js")
+        if not if_file_exists(css) or not if_file_exists(js):
+            LOGGER.info("Downloading styles")
+            self.download_css_js()
         self.crawl(args, options)
         self.scrape(args, options)
 
@@ -1084,12 +1190,41 @@ class ReadWriteThinkChef(JsonTreeChef):
         )
         crawling_stage = os.path.join(ReadWriteThinkChef.TREES_DATA_DIR,                     
                                     ReadWriteThinkChef.CRAWLING_STAGE_OUTPUT_TPL)
+        resources_theme = {
+            "10": "Arts",
+            "16": "Careers",
+            "11": "Community",
+            "13": "Drama",
+            "18": "English-Language Learners",
+            "17": "Family",
+            "6": "Fiction",
+            "19": "Mathematics",
+            "25": "Mobile Learning",
+            "9": "Non Fiction",
+            "7": "Poetry",
+            "5": "Science",
+            "23": "Season / Holiday",
+            "15": "Social Action",
+            "22": "Social Studies / History",
+            "21": "Sports",
+            "24": "STEM"
+        }
+
+        themes_map = {}
+        for theme_id, theme_name in resources_theme.items():
+            curriculum_url = urljoin(ReadWriteThinkChef.ROOT_URL.format(HOSTNAME=ReadWriteThinkChef.HOSTNAME), "search/?theme={}".format(theme_id))
+            resource_browser = ResourceBrowser(curriculum_url, get_only_id=True)
+            for data in resource_browser.run(limit_page=None):
+                themes_map[data["id"]] = theme_name
+
         resources_types = [(6, "Lesson Plans"), (70, "Activities & Projects"), 
             (74, "Tips & Howtos"), (56, "Strategy Guide"), (18, "Printouts")]
         for resource_id, resource_name in resources_types:
             curriculum_url = urljoin(ReadWriteThinkChef.ROOT_URL.format(HOSTNAME=ReadWriteThinkChef.HOSTNAME), "search/?resource_type={}".format(resource_id))
             resource_browser = ResourceBrowser(curriculum_url)
             for data in resource_browser.run(limit_page=None):
+                theme_name = themes_map.get(data["id"], "")
+                data["theme"] = theme_name
                 web_resource_tree["children"][data["url"]] = data
         web_resource_tree["children"] = list(web_resource_tree["children"].values())
         with open(crawling_stage, 'w') as f:
@@ -1098,7 +1233,11 @@ class ReadWriteThinkChef(JsonTreeChef):
 
     def scrape(self, args, options):
         cache_tree = options.get('cache_tree', '1')
-        
+        download_video = options.get('--download-video', "1")
+        if int(download_video) == 0:
+            global DOWNLOAD_VIDEOS
+            DOWNLOAD_VIDEOS = False
+
         with open(self.crawling_stage, 'r') as f:
             web_resource_tree = json.load(f)
             assert web_resource_tree['kind'] == 'ReadWriteThinkResourceTree'
@@ -1123,20 +1262,18 @@ class ReadWriteThinkChef(JsonTreeChef):
                 license=ReadWriteThinkChef.LICENSE,
             )
         counter = 0
-        types = set([])
         total_size = len(web_resource_tree["children"])
         for resource in web_resource_tree["children"]:
-            if 0 <= counter <= total_size:
+            if 0 <= counter < total_size:
                 LOGGER.info("{} of {}".format(counter, total_size))
                 collection = Collection(source_id=resource["url"],
                                 type=resource["collection"],
                                 obj_id=resource["id"],
-                                subtype=resource["sub_type"])
+                                subtype=resource["sub_type"],
+                                grades=resource["grades"],
+                                theme=resource["theme"])
                 collection.to_file()
-                node = collection.to_node(channel_tree)
-                if collection.type not in types and node is not None:
-                    channel_tree["children"].append(node)
-                    types.add(collection.type)
+                collection.to_node(channel_tree)
             counter += 1
         return channel_tree
 
